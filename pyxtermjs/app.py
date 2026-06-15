@@ -7,7 +7,6 @@ from flask import Flask, redirect, render_template, request, session, url_for
 from flask_socketio import SocketIO
 import pty
 import os
-import subprocess
 import select
 import termios
 import struct
@@ -15,6 +14,8 @@ import fcntl
 import shlex
 import logging
 import sys
+import signal
+import time
 from werkzeug.security import check_password_hash, generate_password_hash
 
 logging.getLogger("werkzeug").setLevel(logging.ERROR)
@@ -25,8 +26,13 @@ app = Flask(__name__, template_folder=".", static_folder=".", static_url_path=""
 app.config["SECRET_KEY"] = os.environ.get("PYXTERMJS_SECRET_KEY") or os.urandom(32)
 app.config["fd"] = None
 app.config["child_pid"] = None
+app.config["pty_owner_sid"] = None
 app.config["auth"] = None
 socketio = SocketIO(app)
+
+PTY_READ_BYTES = 1024 * 20
+PTY_TERMINATE_TIMEOUT_SECONDS = 1.0
+PTY_TERMINATE_POLL_SECONDS = 0.05
 
 
 def load_auth_config(auth_file):
@@ -86,18 +92,82 @@ def set_winsize(fd, row, col, xpix=0, ypix=0):
     fcntl.ioctl(fd, termios.TIOCSWINSZ, winsize)
 
 
-def read_and_forward_pty_output():
-    max_read_bytes = 1024 * 20
-    while True:
+def close_fd(fd):
+    if fd is not None:
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+
+
+def signal_child_process(child_pid, sig):
+    if child_pid:
+        try:
+            os.kill(child_pid, sig)
+        except ProcessLookupError:
+            pass
+        except OSError:
+            logging.exception("failed to signal child pty process %s", child_pid)
+
+
+def reap_child_process(child_pid):
+    if not child_pid:
+        return
+
+    deadline = time.monotonic() + PTY_TERMINATE_TIMEOUT_SECONDS
+    while time.monotonic() < deadline:
+        try:
+            waited_pid, _ = os.waitpid(child_pid, os.WNOHANG)
+        except ChildProcessError:
+            return
+
+        if waited_pid == child_pid:
+            return
+        time.sleep(PTY_TERMINATE_POLL_SECONDS)
+
+    signal_child_process(child_pid, signal.SIGKILL)
+    try:
+        os.waitpid(child_pid, 0)
+    except ChildProcessError:
+        pass
+
+
+def terminate_pty():
+    child_pid = app.config.get("child_pid")
+    fd = app.config.get("fd")
+
+    app.config["fd"] = None
+    app.config["child_pid"] = None
+    app.config["pty_owner_sid"] = None
+
+    close_fd(fd)
+    signal_child_process(child_pid, signal.SIGHUP)
+    reap_child_process(child_pid)
+
+
+def read_and_forward_pty_output(fd):
+    while app.config["fd"] == fd:
         socketio.sleep(0.01)
-        if app.config["fd"]:
-            timeout_sec = 0
-            (data_ready, _, _) = select.select([app.config["fd"]], [], [], timeout_sec)
-            if data_ready:
-                output = os.read(app.config["fd"], max_read_bytes).decode(
-                    errors="ignore"
-                )
-                socketio.emit("pty-output", {"output": output}, namespace="/pty")
+        timeout_sec = 0
+        try:
+            (data_ready, _, _) = select.select([fd], [], [], timeout_sec)
+            if not data_ready:
+                continue
+            output = os.read(fd, PTY_READ_BYTES)
+        except OSError:
+            break
+
+        if not output:
+            break
+
+        socketio.emit(
+            "pty-output",
+            {"output": output.decode(errors="ignore")},
+            namespace="/pty",
+        )
+
+    if app.config["fd"] == fd:
+        terminate_pty()
 
 
 @app.route("/")
@@ -160,8 +230,7 @@ def connect():
 
     logging.info("new client connected")
     if app.config["child_pid"]:
-        # already started child process, don't start another
-        return
+        terminate_pty()
 
     # create child process attached to a pty we can read from and write to
     (child_pid, fd) = pty.fork()
@@ -169,17 +238,22 @@ def connect():
         # this is the child process fork.
         # anything printed here will show up in the pty, including the output
         # of this subprocess
-        subprocess.run(app.config["cmd"])
+        try:
+            os.execvp(app.config["cmd"][0], app.config["cmd"])
+        except OSError as e:
+            print(f"failed to execute terminal command: {e}", file=sys.stderr)
+            os._exit(127)
     else:
         # this is the parent process fork.
         # store child fd and pid
         app.config["fd"] = fd
         app.config["child_pid"] = child_pid
+        app.config["pty_owner_sid"] = request.sid
         set_winsize(fd, 50, 50)
         cmd = " ".join(shlex.quote(c) for c in app.config["cmd"])
         # logging/print statements must go after this because... I have no idea why
         # but if they come before the background task never starts
-        socketio.start_background_task(target=read_and_forward_pty_output)
+        socketio.start_background_task(target=read_and_forward_pty_output, fd=fd)
 
         logging.info(f"child pid is {child_pid}")
         logging.info(
@@ -187,6 +261,14 @@ def connect():
             "and forward pty output to client"
         )
         logging.info("task started")
+
+
+@socketio.on("disconnect", namespace="/pty")
+def disconnect():
+    """client disconnected"""
+    if app.config["pty_owner_sid"] == request.sid:
+        logging.info("client disconnected, terminating child pty")
+        terminate_pty()
 
 
 def main():
