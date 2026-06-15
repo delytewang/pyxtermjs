@@ -31,6 +31,12 @@ Startup requires an `--auth-file` argument:
 pyxtermjs --auth-file auth.json
 ```
 
+When running from a cloned checkout, use the project virtual environment:
+
+```bash
+.venv/bin/python -m pyxtermjs --auth-file auth.json
+```
+
 If `--auth-file` is omitted, the process exits before starting the Flask server with a clear error message.
 
 The JSON file must contain:
@@ -38,7 +44,7 @@ The JSON file must contain:
 ```json
 {
   "username": "admin",
-  "password_hash": "scrypt:32768:8:1$...$..."
+  "password_hash": "pbkdf2:sha256:..."
 }
 ```
 
@@ -56,6 +62,12 @@ Add a helper command:
 
 ```bash
 pyxtermjs --generate-password-hash
+```
+
+From a cloned checkout:
+
+```bash
+.venv/bin/python -m pyxtermjs --generate-password-hash
 ```
 
 This command prompts for a password using `getpass`, generates a hash with Werkzeug, prints the hash, and exits without starting the server.

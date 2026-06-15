@@ -1,0 +1,4 @@
+{
+  "username": "admin",
+  "password_hash": "pbkdf2:sha256:..."
+}

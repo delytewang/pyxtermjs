@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
 import argparse
-from flask import Flask, render_template
+import getpass
+import hmac
+import json
+from flask import Flask, redirect, render_template, request, session, url_for
 from flask_socketio import SocketIO
 import pty
 import os
@@ -12,16 +15,69 @@ import fcntl
 import shlex
 import logging
 import sys
+from werkzeug.security import check_password_hash, generate_password_hash
 
 logging.getLogger("werkzeug").setLevel(logging.ERROR)
 
 __version__ = "0.5.0.2"
 
 app = Flask(__name__, template_folder=".", static_folder=".", static_url_path="")
-app.config["SECRET_KEY"] = "secret!"
+app.config["SECRET_KEY"] = os.environ.get("PYXTERMJS_SECRET_KEY") or os.urandom(32)
 app.config["fd"] = None
 app.config["child_pid"] = None
+app.config["auth"] = None
 socketio = SocketIO(app)
+
+
+def load_auth_config(auth_file):
+    try:
+        with open(auth_file, "r", encoding="utf-8") as f:
+            auth = json.load(f)
+    except OSError as e:
+        raise ValueError(f"could not read auth file: {e}") from e
+    except json.JSONDecodeError as e:
+        raise ValueError(f"auth file is not valid JSON: {e}") from e
+
+    if not isinstance(auth, dict):
+        raise ValueError("auth file must contain a JSON object")
+
+    username = auth.get("username")
+    password_hash = auth.get("password_hash")
+    if not isinstance(username, str) or not username:
+        raise ValueError("auth file must include a non-empty username string")
+    if not isinstance(password_hash, str) or not password_hash:
+        raise ValueError("auth file must include a non-empty password_hash string")
+
+    return {"username": username, "password_hash": password_hash}
+
+
+def is_authenticated():
+    return bool(session.get("authenticated"))
+
+
+def authenticate(username, password):
+    auth = app.config["auth"]
+    username_matches = hmac.compare_digest(username, auth["username"])
+    password_matches = check_password_hash(auth["password_hash"], password)
+    return username_matches and password_matches
+
+
+def generate_password_hash_command():
+    password = getpass.getpass("Password: ")
+    confirm_password = getpass.getpass("Confirm password: ")
+    if password != confirm_password:
+        print("passwords do not match", file=sys.stderr)
+        return 1
+    print(generate_password_hash(password))
+    return 0
+
+
+@app.before_request
+def protect_static_html_templates():
+    if request.endpoint == "static" and request.path in ("/index.html", "/login.html"):
+        if is_authenticated():
+            return redirect(url_for("index"))
+        return redirect(url_for("login"))
 
 
 def set_winsize(fd, row, col, xpix=0, ypix=0):
@@ -46,7 +102,33 @@ def read_and_forward_pty_output():
 
 @app.route("/")
 def index():
+    if not is_authenticated():
+        return redirect(url_for("login"))
     return render_template("index.html")
+
+
+@app.route("/login", methods=["GET", "POST"])
+def login():
+    if is_authenticated():
+        return redirect(url_for("index"))
+
+    error = None
+    if request.method == "POST":
+        username = request.form.get("username", "")
+        password = request.form.get("password", "")
+        if authenticate(username, password):
+            session.clear()
+            session["authenticated"] = True
+            return redirect(url_for("index"))
+        error = "Invalid username or password"
+
+    return render_template("login.html", error=error)
+
+
+@app.route("/logout")
+def logout():
+    session.clear()
+    return redirect(url_for("login"))
 
 
 @socketio.on("pty-input", namespace="/pty")
@@ -54,6 +136,8 @@ def pty_input(data):
     """write to the child pty. The pty sees this as if you are typing in a real
     terminal.
     """
+    if not is_authenticated():
+        return
     if app.config["fd"]:
         logging.debug("received input from browser: %s" % data["input"])
         os.write(app.config["fd"], data["input"].encode())
@@ -61,6 +145,8 @@ def pty_input(data):
 
 @socketio.on("resize", namespace="/pty")
 def resize(data):
+    if not is_authenticated():
+        return
     if app.config["fd"]:
         logging.debug(f"Resizing window to {data['rows']}x{data['cols']}")
         set_winsize(app.config["fd"], data["rows"], data["cols"])
@@ -69,6 +155,9 @@ def resize(data):
 @socketio.on("connect", namespace="/pty")
 def connect():
     """new client connected"""
+    if not is_authenticated():
+        return False
+
     logging.info("new client connected")
     if app.config["child_pid"]:
         # already started child process, don't start another
@@ -92,7 +181,7 @@ def connect():
         # but if they come before the background task never starts
         socketio.start_background_task(target=read_and_forward_pty_output)
 
-        logging.info("child pid is " + child_pid)
+        logging.info(f"child pid is {child_pid}")
         logging.info(
             f"starting background task with command `{cmd}` to continously read "
             "and forward pty output to client"
@@ -119,6 +208,15 @@ def main():
     parser.add_argument("--debug", action="store_true", help="debug the server")
     parser.add_argument("--version", action="store_true", help="print version and exit")
     parser.add_argument(
+        "--auth-file",
+        help="JSON file containing username and password_hash for login",
+    )
+    parser.add_argument(
+        "--generate-password-hash",
+        action="store_true",
+        help="prompt for a password, print its hash, and exit",
+    )
+    parser.add_argument(
         "--command", default="bash", help="Command to run in the terminal"
     )
     parser.add_argument(
@@ -129,7 +227,17 @@ def main():
     args = parser.parse_args()
     if args.version:
         print(__version__)
-        exit(0)
+        return 0
+    if args.generate_password_hash:
+        return generate_password_hash_command()
+    if not args.auth_file:
+        parser.error("--auth-file is required")
+
+    try:
+        app.config["auth"] = load_auth_config(args.auth_file)
+    except ValueError as e:
+        parser.error(str(e))
+
     app.config["cmd"] = [args.command] + shlex.split(args.cmd_args)
     green = "\033[92m"
     end = "\033[0m"
@@ -146,6 +254,7 @@ def main():
     )
     logging.info(f"serving on http://{args.host}:{args.port}")
     socketio.run(app, debug=args.debug, port=args.port, host=args.host)
+    return 0
 
 
 if __name__ == "__main__":

@@ -34,50 +34,114 @@ There are a few ways to install and run.
 ### Clone & Run Locally
 Clone this repository, enter the `pyxtermjs` directory.
 
+Create a virtual environment and install dependencies:
+```
+> python3 -m venv .venv
+> .venv/bin/python -m pip install -r requirements.txt
+```
+
+Create an auth file before starting the server:
+```
+> .venv/bin/python -m pyxtermjs --generate-password-hash
+```
+
+Put the generated hash in `auth.json`:
+```json
+{
+  "username": "admin",
+  "password_hash": "pbkdf2:sha256:..."
+}
+```
+
+Start the server:
+```
+> .venv/bin/python -m pyxtermjs --auth-file auth.json
+```
+
 If you have [nox](https://github.com/theacodes/nox) you can run the following.
 ```
-> nox -s run
+> nox -s run -- --auth-file auth.json
 ```
 Nox takes care of setting up a virtual environment and running the right command for you. You can pass arguments to the server like this
 ```
-> nox -s run -- --debug
+> nox -s run -- --auth-file auth.json --debug
 ```
 
 If you don't have nox, you can run the following from inside a virtual environment.
 ```
-> pip install -r requirements.txt
-> python -m pyxtermjs
-> python -m pyxtermjs --debug
+> .venv/bin/python -m pyxtermjs --auth-file auth.json
+> .venv/bin/python -m pyxtermjs --auth-file auth.json --debug
 ```
 
 ### Install
 You can install with [pipx](https://github.com/pipxproject/pipx) (recommended) or pip.
 ```
 > pipx install pyxtermjs
-> pyxtermjs
+> pyxtermjs --auth-file auth.json
 ```
 
 Or you can try run latest version on PyPI
 ```
-> pipx run pyxtermjs
+> pipx run pyxtermjs --auth-file auth.json
 ```
+
+## Authentication
+pyxtermjs requires a JSON auth file before it will start. Generate a password
+hash with:
+```
+> pyxtermjs --generate-password-hash
+```
+
+When running from a cloned checkout, use the virtualenv Python instead:
+```
+> .venv/bin/python -m pyxtermjs --generate-password-hash
+```
+
+Create `auth.json` with your username and generated password hash:
+```json
+{
+  "username": "admin",
+  "password_hash": "pbkdf2:sha256:..."
+}
+```
+
+Then start the server with:
+```
+> pyxtermjs --auth-file auth.json
+```
+
+From a cloned checkout:
+```
+> .venv/bin/python -m pyxtermjs --auth-file auth.json
+```
+
+Set `PYXTERMJS_SECRET_KEY` if you want browser sessions to survive server
+restarts. If it is not set, pyxtermjs generates a new in-memory session secret
+on startup.
 
 ## API
 ```
 > pyxtermjs --help
 usage: pyxtermjs [-h] [-p PORT] [--host HOST] [--debug] [--version]
+                 [--auth-file AUTH_FILE] [--generate-password-hash]
                  [--command COMMAND] [--cmd-args CMD_ARGS]
 
 A fully functional terminal in your browser.
 https://github.com/cs01/pyxterm.js
 
-optional arguments:
+options:
   -h, --help            show this help message and exit
   -p PORT, --port PORT  port to run server on (default: 5000)
   --host HOST           host to run server on (use 0.0.0.0 to allow access
                         from other hosts) (default: 127.0.0.1)
   --debug               debug the server (default: False)
   --version             print version and exit (default: False)
+  --auth-file AUTH_FILE
+                        JSON file containing username and password_hash for
+                        login (default: None)
+  --generate-password-hash
+                        prompt for a password, print its hash, and exit
+                        (default: False)
   --command COMMAND     Command to run in the terminal (default: bash)
   --cmd-args CMD_ARGS   arguments to pass to command (i.e. --cmd-args='arg1
                         arg2 --flag') (default: )

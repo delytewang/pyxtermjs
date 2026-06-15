@@ -1,6 +1,8 @@
 dist
 .DS_Store
 venv
+.venv
+auth.json
 .vscode
 *egg-info*
 build
