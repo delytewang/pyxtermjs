@@ -58,6 +58,16 @@ Start the server:
 > .venv/bin/python -m pyxtermjs --auth-file auth.json
 ```
 
+Or use the included run script:
+```
+> ./run.sh
+```
+
+`run.sh` starts pyxtermjs on `0.0.0.0` and uses `terminal-entry.sh` as the
+terminal command. By default, `terminal-entry.sh` attaches to tmux session
+`main`, or creates it if it does not exist. Edit `SESSION_NAME` in
+`terminal-entry.sh` to use a different tmux session.
+
 If you have [nox](https://github.com/theacodes/nox) you can run the following.
 ```
 > nox -s run -- --auth-file auth.json
